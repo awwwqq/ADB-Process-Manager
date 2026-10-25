@@ -1,4 +1,4 @@
-# Phone Task Manager · 0.2.0 preview
+# Phone Task Manager · 0.2.1 preview
 
 A Windows desktop app for inspecting an Android phone through ADB, with a familiar Task Manager layout. It works locally and requires no root or phone companion app.
 
@@ -12,6 +12,8 @@ Connect your Android phone with a USB data cable, enable **Developer options →
 
 - Live process groups with CPU %, memory, subprocess counts, and foreground/background/cached state where reported.
 - Sort columns, search names or package IDs, and filter apps/background/system processes.
+- Resize columns by dragging the header dividers, including Status. Arrow keys also adjust focused dividers; double-click a divider to reset all widths. Sizes are saved locally and adapt when the window changes.
+- A process table that fills the remaining window height, with separately laid-out metric graphs and captions.
 - Total CPU and memory graphs, swap, free storage, uptime, battery and available CPU temperatures.
 - Installed, disabled, and removed package inventory for Android user 0.
 - Force stop for user apps, disable/re-enable controls, and retained-data user removal/restore for four reviewed Xiaomi extras.
@@ -23,7 +25,7 @@ Connect your Android phone with a USB data cable, enable **Developer options →
 
 Chipset identities are shown from device-reported IDs; the SM8635 name and accelerator mapping are verified against [Xiaomi's POCO F6 processor specifications](https://www.mi.com/uk/support/faq/details/KA-165333/) and [Qualcomm's SM8635 product brief](https://docs.qualcomm.com/doc/87-73942-1/87-73942-1_REV_B_Snapdragon_8s_Gen_3_Mobile_Platform_Product_Brief.pdf). Unknown hardware retains its raw identifier rather than being guessed. GPU model comes from the device when available. GPU utilization and clock are shown only if readable; blocked readings remain unavailable. NPU identification does not imply utilization is measurable. Device sensor names include physical, virtual, and wake-up variants; this app lists them without collecting live motion events. Thermal/power sensor units are retained by type, so voltage and charge channels are not mislabeled as temperatures.
 
-The reviewed Xiaomi packages are `com.miui.msa.global`, `com.miui.analytics`, `com.mi.appfinder`, and `com.mi.globalminusscreen`. Manufacturer restrictions can block disabling. The app reports the failure and never silently switches to removal. Removal has its own button and confirmation. These four packages were already removed from the connected POCO before this app was built; they appear as removed in Apps, with restoration available.
+The reviewed Xiaomi packages are `com.miui.msa.global`, `com.miui.analytics`, `com.mi.appfinder`, and `com.mi.globalminusscreen`. Manufacturer restrictions can block disabling. The app reports the failure and never silently switches to removal. Removal has its own button and confirmation. Previously removed system packages appear in Apps with restoration available when their system copies remain on the device.
 
 ## Measurements and limits
 
@@ -45,6 +47,7 @@ npx install-electron
 powershell -NoProfile -File scripts/setup-adb.ps1
 npm start
 npm test
+npm run test:ui
 npm run build
 ```
 
@@ -53,4 +56,6 @@ The setup script downloads Android Platform Tools directly from Google into the 
 ## Validation
 
 Parser and action guard tests cover eight-core CPU normalization, Toybox CPU headers, available memory, process grouping/states, injection rejection, confirmation, and protected packages. The live UI was checked against a POCO F6 running Android 16 / HyperOS 3: connection, process search, graph navigation, removed-package discovery, settings, native-process filtering, and cancellation of an action without modifying the phone. Successful mutation flows are tested with simulated ADB responses; the UI validation itself makes no changes to the phone. Broader manufacturer testing is still needed.
+
+`npm run test:ui` runs deterministic Electron layout checks with fixture data and disabled phone-action handlers. It verifies non-overlapping metric cards, process-panel height at four window sizes, column dragging, keyboard resizing, persistence after reload, and reset. The test does not need an attached phone. Screenshots and isolated test profiles are stored in the ignored `.cache` directory.
 

@@ -17,6 +17,7 @@ function notice(message = '') { $('notice').textContent = message; $('notice').h
 let toastTimer;
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 6000); }
 function setView(view) {
+  document.querySelector('main').dataset.currentView = view;
   state.view = view; document.querySelectorAll('.view').forEach(v => v.hidden = v.id !== `${view}View`);
   document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   const [title, description, eyebrow] = titles[view]; $('pageTitle').textContent = title; $('pageDescription').textContent = description; $('eyebrow').textContent = eyebrow;
@@ -221,7 +222,7 @@ $('refresh').addEventListener('click', () => state.serial ? poll() : scan());
 $('pause').addEventListener('click', () => { state.paused = !state.paused; $('pause').textContent = state.paused ? '▷ Resume' : 'Ⅱ Pause'; $('liveBadge').className = 'live-badge' + (state.paused ? '' : ' running'); $('liveBadge').innerHTML = `<span class="dot"></span>${state.paused ? 'Paused' : 'Live'}`; if (state.paused) clearTimeout(state.timer); else poll(); });
 $('processSearch').addEventListener('input', renderProcesses); $('appSearch').addEventListener('input', renderApps);
 for (const [id, key, render] of [['processFilters', 'filter', renderProcesses], ['appFilters', 'appFilter', renderApps]]) $(id).addEventListener('click', e => { const b = e.target.closest('[data-filter]'); if (!b) return; state[key] = b.dataset.filter; $(id).querySelectorAll('button').forEach(x => x.classList.toggle('selected', x === b)); render(); });
-document.querySelectorAll('[data-sort]').forEach(th => th.addEventListener('click', () => { state.direction = state.sort === th.dataset.sort ? -state.direction : ['name', 'state'].includes(th.dataset.sort) ? 1 : -1; state.sort = th.dataset.sort; document.querySelectorAll('[data-sort]').forEach(h => { h.classList.toggle('sorted', h === th); const span = h.querySelector('span'); if (span) span.textContent = h === th ? state.direction === -1 ? '↓' : '↑' : ''; }); renderProcesses(); }));
+document.querySelectorAll('[data-sort]').forEach(th => th.addEventListener('click', () => { state.direction = state.sort === th.dataset.sort ? -state.direction : ['name', 'state'].includes(th.dataset.sort) ? 1 : -1; state.sort = th.dataset.sort; document.querySelectorAll('[data-sort]').forEach(h => { h.classList.toggle('sorted', h === th); const span = h.querySelector('span:not(.column-resizer)'); if (span) span.textContent = h === th ? state.direction === -1 ? '↓' : '↑' : ''; }); renderProcesses(); }));
 $('interval').addEventListener('change', e => { state.interval = Number(e.target.value); schedule(); });
 $('nativeToggle').addEventListener('change', e => { state.native = e.target.checked; renderProcesses(); });
 for (const id of ['minimize', 'maximize', 'close']) $(id).addEventListener('click', () => window.phone.window(id));
