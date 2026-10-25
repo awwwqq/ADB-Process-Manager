@@ -1,6 +1,7 @@
 const $ = id => document.getElementById(id);
 const state = { serial: '', info: null, snapshot: null, packages: [], view: 'processes', filter: 'all', appFilter: 'all',
-  selected: null, sort: 'cpu', direction: -1, paused: false, busy: false, timer: null, samples: [], interval: 5000, native: false, mutation: false, actionError: '' };
+  selected: null, sort: 'cpu', direction: -1, paused: false, busy: false, timer: null, samples: [], interval: 1000, native: false, mutation: false, actionError: '', performanceMetric: 'cpu', pollStarted: 0 };
+try { const saved = Number(localStorage.getItem('phone-task-manager-rate')); if ([500, 1000, 4000].includes(saved)) state.interval = saved; } catch {}
 const titles = { processes: ['Processes', 'See what’s running. Understand what it’s using.', 'YOUR PHONE, AT A GLANCE'],
   performance: ['Performance', 'Follow the numbers. Find the moments that matter.', 'A CLEARER PICTURE'],
   hardware: ['Hardware & sensors', 'Know the silicon. See the sensors your phone exposes.', 'INSIDE YOUR PHONE'],
@@ -11,7 +12,42 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const fmt = (n, digits = 1) => Number.isFinite(n) ? n.toFixed(digits) : '—';
 const gb = kb => fmt(kb / 1024 / 1024);
 const color = s => [...s].reduce((a, c) => a + c.charCodeAt(0), 0) % 6;
-function icon(name) { const parts = name.replace(/^com\./, '').split(/[\s.]+/).filter(Boolean); return `<span class="app-icon c${color(name)}">${esc((parts.length > 1 && !name.includes('.') ? parts[0][0] + parts[1][0] : parts[0]?.slice(0, 2) || 'SY').toUpperCase())}</span>`; }
+const appIcons = new Map(), requestedIcons = new Set(), queuedIcons = new Set(); let loadingIcons = false;
+function icon(name, pkg) {
+  const src = pkg && appIcons.get(`${state.serial}/${pkg}`);
+  if (src) return `<img class="app-icon real-icon" src="${esc(src)}" alt="${esc(name)} icon">`;
+  const parts = name.replace(/^com\./, '').split(/[\s.]+/).filter(Boolean);
+  return `<span class="app-icon c${color(name)}" ${pkg ? `data-icon-pkg="${esc(pkg)}"` : ''}>${esc((parts.length > 1 && !name.includes('.') ? parts[0][0] + parts[1][0] : parts[0]?.slice(0, 2) || 'SY').toUpperCase())}</span>`;
+}
+const iconObserver = new IntersectionObserver(entries => {
+  for (const item of entries) if (item.isIntersecting) {
+    const pkg = item.target.dataset.iconPkg; const key = `${state.serial}/${pkg}`;
+    if (/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(pkg || '') && !requestedIcons.has(key)) { requestedIcons.add(key); queuedIcons.add(pkg); }
+    iconObserver.unobserve(item.target);
+  }
+  loadVisibleIcons();
+});
+function observeIcons() { iconObserver.disconnect(); document.querySelectorAll('[data-icon-pkg]').forEach(el => iconObserver.observe(el)); }
+async function loadVisibleIcons() {
+  if (loadingIcons || !state.serial || !window.phone.icons || !queuedIcons.size) return;
+  const visible = pkg => [...document.querySelectorAll(`[data-icon-pkg="${CSS.escape(pkg)}"]`)].some(el => {
+    const box = el.getBoundingClientRect(); const root = el.closest('.table-scroll, .app-list')?.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && box.bottom > Math.max(0, root?.top || 0) && box.top < Math.min(innerHeight, root?.bottom || innerHeight);
+  });
+  const packages = [...queuedIcons].filter(visible).slice(0, 1);
+  if (!packages.length) { for (const pkg of queuedIcons) requestedIcons.delete(`${state.serial}/${pkg}`); queuedIcons.clear(); return; }
+  loadingIcons = true; const serial = state.serial; packages.forEach(p => queuedIcons.delete(p));
+  try {
+    const result = await api(window.phone.icons(serial, packages));
+    for (const item of result) {
+      if (!/^data:image\/(?:png|webp);base64,[A-Za-z0-9+/=]+$/.test(item.icon || '')) continue;
+      appIcons.set(`${serial}/${item.pkg}`, item.icon);
+      if (serial === state.serial) document.querySelectorAll(`[data-icon-pkg="${CSS.escape(item.pkg)}"]`).forEach(el => {
+        const image = document.createElement('img'); image.className = 'app-icon real-icon'; image.alt = 'App icon'; image.src = item.icon; el.replaceWith(image);
+      });
+    }
+  } catch {} finally { loadingIcons = false; if (queuedIcons.size) loadVisibleIcons(); }
+}
 async function api(promise) { const r = await promise; if (!r.ok) throw new Error(r.error); return r.data; }
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
 let toastTimer;
@@ -21,7 +57,7 @@ function setView(view) {
   state.view = view; document.querySelectorAll('.view').forEach(v => v.hidden = v.id !== `${view}View`);
   document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   const [title, description, eyebrow] = titles[view]; $('pageTitle').textContent = title; $('pageDescription').textContent = description; $('eyebrow').textContent = eyebrow;
-  $('metrics').hidden = ['changes', 'settings', 'hardware'].includes(view);
+  $('metrics').hidden = ['changes', 'settings', 'hardware', 'performance'].includes(view);
   if (view === 'apps') loadPackages(); if (view === 'changes') renderHistory();
   if (view === 'performance') requestAnimationFrame(renderPerformance);
   if (view === 'hardware') renderHardware();
@@ -45,7 +81,8 @@ async function connect(serial) {
   try {
     $('statusText').textContent = 'Connecting to phone…';
     const info = await api(window.phone.connect(serial));
-    state.serial = serial; state.info = info; state.selected = null; state.samples = []; state.snapshot = null;
+    state.serial = serial; state.info = info; state.selected = null; state.samples = []; state.snapshot = null; queuedIcons.clear(); requestedIcons.clear();
+    $('processBody').replaceChildren();
     $('deviceName').textContent = info.name || info.model; $('connectionLabel').textContent = `Android ${info.android} · USB connected`;
     $('connectionLabel').classList.add('connected');
     $('settingsDevice').textContent = `${info.manufacturer} ${info.name} · Android ${info.android} · ${info.build} · ${info.serial}`;
@@ -54,16 +91,16 @@ async function connect(serial) {
 }
 async function poll() {
   clearTimeout(state.timer);
-  if (!state.serial || state.busy || state.mutation) { schedule(); return; }
-  state.busy = true; const serial = state.serial;
+  if (!state.serial || state.busy || state.mutation) return;
+  state.busy = true; state.pollStarted = performance.now(); const serial = state.serial;
   try {
     const snapshot = await api(window.phone.snapshot(serial));
     if (serial !== state.serial) return;
-    state.snapshot = snapshot; state.samples.push({ cpu: snapshot.cpu, memory: snapshot.memory.usedPercent });
-    if (state.samples.length > 60) state.samples.shift();
+    state.snapshot = snapshot; state.samples.push({ at: snapshot.at, cpu: snapshot.cpu, memory: snapshot.memory.usedPercent });
+    state.samples = state.samples.filter(p => p.at >= snapshot.at - 60000);
     $('liveBadge').className = 'live-badge' + (state.paused ? '' : ' running'); $('liveBadge').innerHTML = `<span class="dot"></span>${state.paused ? 'Paused' : 'Live'}`;
     $('statusText').textContent = `${snapshot.info.name} · Android ${snapshot.info.android} · ${snapshot.rows.length} process groups`;
-    $('sampleTime').textContent = `Updated ${new Date(snapshot.at).toLocaleTimeString()} · ${state.interval / 1000}s interval`;
+    $('sampleTime').textContent = `Target ${state.interval / 1000}s · measured ${snapshot.sampling?.intervalMs ? fmt(snapshot.sampling.intervalMs / 1000, 2) + 's' : 'warming up'} · ${snapshot.sampling?.durationMs || '—'}ms read`;
     $('connectionLabel').textContent = `Android ${snapshot.info.android} · USB connected`; $('connectionLabel').classList.add('connected');
     notice([state.actionError, ...snapshot.warnings].filter(Boolean).join(' · ')); renderMetrics(); renderProcesses(); if (state.view === 'performance') renderPerformance(); if (state.view === 'hardware') renderHardware();
   } catch (e) {
@@ -72,7 +109,7 @@ async function poll() {
     $('statusText').textContent = 'Showing last sample · reconnect phone';
   } finally { state.busy = false; schedule(); }
 }
-function schedule() { clearTimeout(state.timer); if (!state.paused && state.serial) state.timer = setTimeout(poll, state.interval); }
+function schedule() { clearTimeout(state.timer); if (!state.paused && state.serial && !state.busy && !state.mutation) state.timer = setTimeout(poll, Math.max(0, state.interval - (performance.now() - state.pollStarted))); }
 function chart(canvasId, values, large = false, channel = 'cpu') {
   const canvas = $(canvasId); if (!canvas || !canvas.clientWidth) return;
   const ratio = window.devicePixelRatio || 1; const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -92,8 +129,8 @@ function chart(canvasId, values, large = false, channel = 'cpu') {
   c.font = `${large ? 10 : 8}px Segoe UI`; c.fillStyle = ink; c.fillText('100%', 5, large ? 13 : 10);
   if (large) c.fillText('0%', 5, h - 6);
   const clean = values.map(v => Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : null); if (!clean.some(v => v !== null)) return;
-  const slots = large ? 60 : 25; const series = clean.slice(-slots); const offset = slots - series.length;
-  const points = series.map((v, i) => [left + ((i + offset) / (slots - 1)) * (right - left), floor - (v ?? 0) / 100 * (floor - ceiling), v]);
+  const windowMs = large ? 60000 : 30000; const newest = state.samples.at(-1)?.at || Date.now();
+  const points = clean.map((v, i) => [left + (1 - (newest - (state.samples[i]?.at || newest)) / windowMs) * (right - left), floor - (v ?? 0) / 100 * (floor - ceiling), v]).filter(p => p[0] >= left);
   const lastPoint = points.at(-1);
   if (lastPoint && lastPoint[2] !== null) { c.beginPath(); c.arc(Math.min(w - 3, lastPoint[0]), lastPoint[1], large ? 2.5 : 1.8, 0, Math.PI * 2); c.fillStyle = tint; c.fill(); }
   c.beginPath(); let started = false; for (const [x, y, v] of points) { if (v === null) { started = false; continue; } if (!started) c.moveTo(x, y); else c.lineTo(x, y); started = true; }
@@ -124,32 +161,64 @@ function filteredRows() {
 }
 function renderProcesses() {
   const rows = filteredRows(); $('navCount').textContent = state.snapshot?.rows.filter(r => r.pkg).length ?? '—';
-  $('processBody').innerHTML = rows.map(r => `<tr data-id="${esc(r.id)}" class="${state.selected === r.id ? 'selected' : ''}" tabindex="0" aria-selected="${state.selected === r.id}"><td><div class="app-identity">${icon(r.name)}<div class="app-identity-text"><div class="app-name">${esc(r.name)}</div><div class="package-name" title="${esc(r.pkg || r.process)}">${esc(r.pkg || r.process)}</div></div></div></td><td><span class="state ${r.state.toLowerCase()}">${esc(r.state)}</span></td><td class="number-col cpu-cell">${fmt(r.cpu)}%</td><td class="number-col">${fmt(r.memory, 0)} <span class="type-tag">MB</span></td><td class="count-col">${r.pids.length}</td><td><span class="type-tag">${r.system ? 'System' : 'User app'}</span></td></tr>`).join('');
+  const body = $('processBody'); const existing = new Map([...body.children].map(tr => [tr.dataset.id, tr]));
+  const update = (element, text) => { if (element.textContent !== text) element.textContent = text; };
+  rows.forEach((r, index) => {
+    let tr = existing.get(r.id); existing.delete(r.id);
+    if (!tr) {
+      tr = document.createElement('tr'); tr.dataset.id = r.id; tr.tabIndex = 0;
+      tr.innerHTML = `<td><div class="app-identity">${icon(r.name, r.pkg)}<div class="app-identity-text"><div class="app-name">${esc(r.name)}</div><div class="package-name" title="${esc(r.pkg || r.process)}">${esc(r.pkg || r.process)}</div></div></div></td><td><span class="state"></span></td><td class="number-col cpu-cell"></td><td class="number-col"><span class="ram-value"></span> <span class="type-tag">MB</span></td><td class="count-col"></td><td><span class="type-tag">${r.system ? 'System' : 'User app'}</span></td>`;
+    }
+    tr.classList.toggle('selected', state.selected === r.id); tr.setAttribute('aria-selected', String(state.selected === r.id));
+    const status = tr.children[1].firstElementChild; status.className = `state ${r.state.toLowerCase()}`; update(status, r.state);
+    update(tr.children[2], `${fmt(r.cpu)}%`); update(tr.querySelector('.ram-value'), fmt(r.memory, 0)); update(tr.children[4], String(r.pids.length));
+    if (body.children[index] !== tr) body.insertBefore(tr, body.children[index] || null);
+  });
+  for (const tr of existing.values()) tr.remove();
   $('processEmpty').hidden = rows.length > 0;
   if (state.snapshot && !rows.length) $('processEmpty').innerHTML = '<div class="empty-icon">⌕</div><h2>No matching processes</h2><p>Try a different search or filter.</p>';
   $('processCount').textContent = `${rows.length} groups · ${rows.reduce((n, r) => n + r.pids.length, 0)} processes`;
   renderSelection();
+  observeIcons();
 }
 function renderSelection() {
   const row = state.snapshot?.rows.find(r => r.id === state.selected);
-  if (!row) { $('selectionPanel').innerHTML = '<div class="selection-placeholder"><span>ⓘ</span><span>Select a process to see its details and available actions.</span></div>'; return; }
+  if (!row) { state.selectionMarkup = null; $('selectionPanel').innerHTML = '<div class="selection-placeholder"><span>ⓘ</span><span>Select a process to see its details and available actions.</span></div>'; return; }
   const actions = [];
   if (row.pkg && !row.protected) {
     if (!row.system) actions.push(['stop', 'Force stop']);
     if (!row.system || row.optional) actions.push(['disable', 'Disable app']);
     if (row.optional) actions.push(['remove', 'Remove for user']);
   }
-  $('selectionPanel').innerHTML = `<div class="selection-detail"><div class="selection-title">${esc(row.name)}${row.protected ? '<span class="tiny-tag">Protected</span>' : ''}</div><div class="selection-sub">${esc(row.note || `${row.state} · PID${row.pids.length > 1 ? 's' : ''}: ${row.pids.join(', ')} · ${row.system ? 'System package; inspect dependencies before changing it.' : 'Force stop can interrupt notifications and unsaved work.'}`)}</div></div><div class="selection-actions">${actions.map(([a, text]) => `<button class="button ${a === 'remove' ? 'danger' : 'secondary'}" data-action="${a}" data-pkg="${esc(row.pkg)}" ${state.mutation ? 'disabled' : ''}>${text}</button>`).join('') || '<span class="type-tag">Inspection only</span>'}</div>`;
+  const markup = `<div class="selection-detail"><div class="selection-title">${esc(row.name)}${row.protected ? '<span class="tiny-tag">Protected</span>' : ''}</div><div class="selection-sub">${esc(row.note || `${row.state} · PID${row.pids.length > 1 ? 's' : ''}: ${row.pids.join(', ')} · ${row.system ? 'System package; inspect dependencies before changing it.' : 'Force stop can interrupt notifications and unsaved work.'}`)}</div></div><div class="selection-actions">${actions.map(([a, text]) => `<button class="button ${a === 'remove' ? 'danger' : 'secondary'}" data-action="${a}" data-pkg="${esc(row.pkg)}" ${state.mutation ? 'disabled' : ''}>${text}</button>`).join('') || '<span class="type-tag">Inspection only</span>'}</div>`;
+  if (state.selectionMarkup !== markup) { $('selectionPanel').innerHTML = markup; state.selectionMarkup = markup; }
 }
 function renderPerformance() {
   const s = state.snapshot; if (!s) return;
-  $('chartCpu').textContent = `${fmt(s.cpu, 0)}%`; $('chartMemory').textContent = `${fmt(s.memory.usedPercent, 0)}%`;
-  $('cpuChartDescription').textContent = s.info.hardware ? `${s.info.hardware.soc} · ${s.info.hardware.cores || '?'} cores` : 'Percentage of total processor capacity';
-  chart('cpuChart', state.samples.map(s => s.cpu), true); chart('memoryChart', state.samples.map(s => s.memory), true, 'memory');
-  const details = [['Available memory', `${gb(s.memory.available)} GB`], ['Compressed swap (logical)', `${gb(s.memory.swapUsed)} / ${gb(s.memory.swapTotal)} GB`],
-    ['Storage free', `${gb(s.storage.free)} / ${gb(s.storage.total)} GB`], ['Uptime', `${Math.floor(s.uptime / 86400)}d ${Math.floor(s.uptime % 86400 / 3600)}h`],
-    ['App process groups', s.rows.filter(r => r.pkg).length], ['Battery temperature', `${fmt(s.battery.temperature)} °C`]];
+  const memory = state.performanceMetric === 'memory'; const hw = s.info.hardware || {};
+  document.querySelectorAll('[data-performance]').forEach(b => { const selected = b.dataset.performance === state.performanceMetric; b.classList.toggle('selected', selected); b.setAttribute('aria-pressed', String(selected)); });
+  $('performanceCpuValue').textContent = `${fmt(s.cpu)}%`; $('performanceMemoryValue').textContent = `${fmt(s.memory.usedPercent)}%`;
+  $('focusTitle').textContent = memory ? 'Memory' : 'CPU';
+  $('cpuChartDescription').textContent = memory ? `${gb(s.memory.total)} GB physical memory` : `${hw.soc || 'Processor'} · ${hw.cores || '?'} cores`;
+  $('focusValue').textContent = `${fmt(memory ? s.memory.usedPercent : s.cpu)}%`;
+  $('focusSubtitle').textContent = memory ? 'Physical RAM utilization · available cache is reclaimable' : 'Total processor utilization · normalized across all cores';
+  chart('focusedChart', state.samples.map(s => memory ? s.memory : s.cpu), true, memory ? 'memory' : 'cpu');
+  chart('performanceCpuSpark', state.samples.map(s => s.cpu)); chart('performanceMemorySpark', state.samples.map(s => s.memory), false, 'memory');
+  const details = memory ? [
+    ['In use', `${gb(s.memory.total - s.memory.available)} GB`], ['Available', `${gb(s.memory.available)} GB`], ['Physical RAM', `${gb(s.memory.total)} GB`],
+    ['Cached pages', s.memory.cached == null ? 'Not reported' : `${gb(s.memory.cached)} GB`], ['Free pages', s.memory.free == null ? 'Not reported' : `${gb(s.memory.free)} GB`],
+    ['Compressed swap (logical)', `${gb(s.memory.swapUsed)} / ${gb(s.memory.swapTotal)} GB`]
+  ] : [
+    ['Utilization', `${fmt(s.cpu)}%`], ['CPU0 clock', s.cpu0MHz ? `${fmt(s.cpu0MHz / 1000, 2)} GHz` : 'Not reported'], ['CPU cores', hw.cores || s.coreUsage?.length || 'Not reported'],
+    ['Architecture', hw.abi || 'Not reported'], ['App processes', s.rows.filter(r => r.pkg).reduce((sum, r) => sum + r.pids.length, 0)],
+    ['Uptime', `${Math.floor(s.uptime / 86400)}d ${Math.floor(s.uptime % 86400 / 3600)}h`]
+  ];
   $('performanceDetails').innerHTML = details.map(([label, value]) => `<div><div class="detail-label">${esc(label)}</div><div class="detail-value">${esc(value)}</div></div>`).join('');
+  $('cpuCoreSection').hidden = memory; $('memoryComposition').hidden = !memory;
+  $('cpuCores').innerHTML = (s.coreUsage || []).map(c => `<div class="cpu-core"><span>${esc(c.name.replace('cpu', 'Core '))}</span><strong>${fmt(c.usage)}%</strong><meter min="0" max="100" value="${Number.isFinite(c.usage) ? c.usage : 0}" aria-label="${esc(c.name)} utilization"></meter></div>`).join('') || '<p class="muted">Per-core counters unavailable.</p>';
+  $('memoryUsedMeter').value = s.memory.usedPercent || 0;
+  $('memoryCompositionText').textContent = `${gb(s.memory.total - s.memory.available)} GB in use · ${gb(s.memory.available)} GB available`;
+  $('performanceSampling').textContent = `60-second history · Target ${state.interval / 1000}s · measured ${s.sampling?.intervalMs ? fmt(s.sampling.intervalMs / 1000, 2) + 's' : 'warming up'} · read ${s.sampling?.durationMs || '—'}ms. App states, clocks and hardware sensors refresh about every 4 seconds.`;
 }
 function renderHardware() {
   const s = state.snapshot; const hw = s?.info.hardware;
@@ -184,8 +253,9 @@ function renderApps() {
   const packages = state.packages.filter(p => (state.appFilter === 'all' || state.appFilter === 'user' && !p.system || state.appFilter === 'system' && p.system || state.appFilter === 'removed' && (!p.installed || p.disabled)) && `${p.name} ${p.pkg}`.toLowerCase().includes(query)).sort((a, b) => Number(b.optional) - Number(a.optional) || a.name.localeCompare(b.name));
   $('appList').innerHTML = packages.map(p => {
     const actions = !p.installed ? [['restore', 'Restore']] : p.disabled ? [['enable', 'Re-enable']] : !p.protected && (!p.system || p.optional) ? [['disable', 'Disable'], ...(p.optional ? [['remove', 'Remove for user']] : [])] : [];
-    return `<div class="app-row"><div class="app-identity">${icon(p.name)}<div class="app-identity-text"><div class="app-name">${esc(p.name)} ${p.optional ? '<span class="tiny-tag">Reviewed extra</span>' : ''}</div><div class="package-name" title="${esc(p.note || p.pkg)}">${esc(p.pkg)}</div></div></div><span class="type-tag">${p.system ? 'System' : 'User app'}</span><span class="app-state">${!p.installed ? 'Removed' : p.disabled ? 'Disabled' : 'Installed'}</span><div class="app-actions">${actions.map(([a, text]) => `<button class="button secondary" data-action="${a}" data-pkg="${esc(p.pkg)}" ${state.mutation ? 'disabled' : ''}>${text}</button>`).join('') || '<span class="type-tag">Protected / inspect only</span>'}</div></div>`;
+    return `<div class="app-row"><div class="app-identity">${icon(p.name, p.pkg)}<div class="app-identity-text"><div class="app-name">${esc(p.name)} ${p.optional ? '<span class="tiny-tag">Reviewed extra</span>' : ''}</div><div class="package-name" title="${esc(p.note || p.pkg)}">${esc(p.pkg)}</div></div></div><span class="type-tag">${p.system ? 'System' : 'User app'}</span><span class="app-state">${!p.installed ? 'Removed' : p.disabled ? 'Disabled' : 'Installed'}</span><div class="app-actions">${actions.map(([a, text]) => `<button class="button secondary" data-action="${a}" data-pkg="${esc(p.pkg)}" ${state.mutation ? 'disabled' : ''}>${text}</button>`).join('') || '<span class="type-tag">Protected / inspect only</span>'}</div></div>`;
   }).join('') || '<div class="empty-state"><h2>No apps to show</h2><p>Connect a phone or adjust your filters.</p></div>';
+  observeIcons();
 }
 async function renderHistory() {
   try {
@@ -209,7 +279,8 @@ document.addEventListener('click', e => {
   const row = e.target.closest('tr[data-id]'); if (row) { state.selected = row.dataset.id; renderProcesses(); }
   const act = e.target.closest('[data-action]'); if (act) action(act.dataset.pkg, act.dataset.action);
   const undo = e.target.closest('[data-undo]'); if (undo) action(null, null, undo.dataset.undo);
-  const metric = e.target.closest('[data-metric]'); if (metric) setView(metric.dataset.metric === 'thermal' ? 'hardware' : 'performance');
+  const metric = e.target.closest('[data-metric]'); if (metric) { if (['cpu', 'memory'].includes(metric.dataset.metric)) state.performanceMetric = metric.dataset.metric; setView(metric.dataset.metric === 'thermal' ? 'hardware' : 'performance'); }
+  const focus = e.target.closest('[data-performance]'); if (focus) { state.performanceMetric = focus.dataset.performance; renderPerformance(); }
   const theme = e.target.closest('[data-theme-choice]'); if (theme) applyTheme(theme.dataset.themeChoice);
 });
 document.addEventListener('keydown', e => {
@@ -219,11 +290,18 @@ document.addEventListener('keydown', e => {
 for (const id of ['refreshDevices', 'emptyScan', 'settingsScan']) $(id).addEventListener('click', scan);
 $('deviceSelect').addEventListener('change', e => { if (e.target.value) connect(e.target.value); });
 $('refresh').addEventListener('click', () => state.serial ? poll() : scan());
-$('pause').addEventListener('click', () => { state.paused = !state.paused; $('pause').textContent = state.paused ? '▷ Resume' : 'Ⅱ Pause'; $('liveBadge').className = 'live-badge' + (state.paused ? '' : ' running'); $('liveBadge').innerHTML = `<span class="dot"></span>${state.paused ? 'Paused' : 'Live'}`; if (state.paused) clearTimeout(state.timer); else poll(); });
+$('pause').addEventListener('click', () => { state.paused = !state.paused; $('pause').textContent = state.paused ? '▷ Resume' : 'Ⅱ Pause'; $('interval').value = state.paused ? '0' : String(state.interval); $('liveBadge').className = 'live-badge' + (state.paused ? '' : ' running'); $('liveBadge').innerHTML = `<span class="dot"></span>${state.paused ? 'Paused' : 'Live'}`; if (state.paused) clearTimeout(state.timer); else poll(); });
 $('processSearch').addEventListener('input', renderProcesses); $('appSearch').addEventListener('input', renderApps);
 for (const [id, key, render] of [['processFilters', 'filter', renderProcesses], ['appFilters', 'appFilter', renderApps]]) $(id).addEventListener('click', e => { const b = e.target.closest('[data-filter]'); if (!b) return; state[key] = b.dataset.filter; $(id).querySelectorAll('button').forEach(x => x.classList.toggle('selected', x === b)); render(); });
 document.querySelectorAll('[data-sort]').forEach(th => th.addEventListener('click', () => { state.direction = state.sort === th.dataset.sort ? -state.direction : ['name', 'state'].includes(th.dataset.sort) ? 1 : -1; state.sort = th.dataset.sort; document.querySelectorAll('[data-sort]').forEach(h => { h.classList.toggle('sorted', h === th); const span = h.querySelector('span:not(.column-resizer)'); if (span) span.textContent = h === th ? state.direction === -1 ? '↓' : '↑' : ''; }); renderProcesses(); }));
-$('interval').addEventListener('change', e => { state.interval = Number(e.target.value); schedule(); });
+$('interval').value = String(state.interval);
+$('interval').addEventListener('change', e => {
+  const interval = Number(e.target.value); state.paused = interval === 0;
+  if (interval) { state.interval = interval; try { localStorage.setItem('phone-task-manager-rate', String(interval)); } catch {} }
+  $('pause').textContent = state.paused ? '▷ Resume' : 'Ⅱ Pause';
+  $('liveBadge').className = 'live-badge' + (state.paused ? '' : ' running'); $('liveBadge').innerHTML = `<span class="dot"></span>${state.paused ? 'Paused' : 'Live'}`;
+  if (state.paused) clearTimeout(state.timer); else schedule();
+});
 $('nativeToggle').addEventListener('change', e => { state.native = e.target.checked; renderProcesses(); });
 for (const id of ['minimize', 'maximize', 'close']) $(id).addEventListener('click', () => window.phone.window(id));
 window.addEventListener('resize', () => { renderMetrics(); if (state.view === 'performance') renderPerformance(); });

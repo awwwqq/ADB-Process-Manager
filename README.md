@@ -1,4 +1,4 @@
-# Phone Task Manager · 0.2.1 preview
+# Phone Task Manager · 0.3.0 preview
 
 A Windows desktop app for inspecting an Android phone through ADB, with a familiar Task Manager layout. It works locally and requires no root or phone companion app.
 
@@ -14,6 +14,9 @@ Connect your Android phone with a USB data cable, enable **Developer options →
 - Sort columns, search names or package IDs, and filter apps/background/system processes.
 - Resize columns by dragging the header dividers, including Status. Arrow keys also adjust focused dividers; double-click a divider to reset all widths. Sizes are saved locally and adapt when the window changes.
 - A process table that fills the remaining window height, with separately laid-out metric graphs and captions.
+- High (0.5 s), Normal (1 s, default), Low (4 s), and Paused refresh modes. The status bar shows the requested interval, measured interval, and collection time. Slow ADB reads can lower the achieved rate.
+- CPU and Memory selectors in Performance, with a focused 60-second graph. CPU includes per-core utilization, CPU0 clock, architecture, process count, and uptime; Memory includes physical usage, availability, cache, and logical swap.
+- Real bitmap app icons extracted from installed APK resources, loaded for visible rows and cached on the PC. Unsupported adaptive/vector-only icons, missing split resources, and blocked access keep the initials fallback. No helper app or phone installation is required.
 - Total CPU and memory graphs, swap, free storage, uptime, battery and available CPU temperatures.
 - Installed, disabled, and removed package inventory for Android user 0.
 - Force stop for user apps, disable/re-enable controls, and retained-data user removal/restore for four reviewed Xiaomi extras.
@@ -29,13 +32,13 @@ The reviewed Xiaomi packages are `com.miui.msa.global`, `com.miui.analytics`, `c
 
 ## Measurements and limits
 
-CPU is normalized to 0–100% across all CPU cores, based on the last sampled `top` interval. App CPU sums the package's processes. RAM is process RSS in MB, including shared pages; adding all rows can double count shared memory. The total memory card uses `MemAvailable`, so reclaimable cache is not treated as unavailable memory. Swap shows logical compressed swap usage, not additional physical RAM. Cached processes are normal and are not automatically stopped. Process states are snapshots and can change between commands. Thermal status uses the system's current status, and CPU temperatures use current HAL readings rather than cached readings.
+CPU is normalized to 0–100% across all CPU cores using deltas of `/proc/stat` counters; idle and I/O-wait time are excluded from busy CPU time. App CPU sums differences in process `TIME+` counters over the measured interval and divides by core count. The first sample warms up the counters and displays a dash rather than a made-up zero. RAM is process RSS in MB, including shared pages; adding all rows can double count shared memory. The total memory card uses `MemAvailable`, so reclaimable cache is not treated as unavailable memory. Swap shows logical compressed swap usage, not additional physical RAM. Cached processes are normal and are not automatically stopped. Process states are snapshots and can change between commands. Thermal status uses the system's current status, and CPU temperatures use current HAL readings rather than cached readings.
 
-The backend reads diagnostic commands, so polling itself introduces some load. A five-second default interval limits that overhead. Change it in Settings or pause updates. Some phones restrict metrics; unavailable sensors display a dash. Exact per-app network traffic, disk activity, energy consumption, and per-app GPU utilization are not provided. Global GPU utilization and clock are shown only when the firmware exposes readable measurements. Package display names use a built-in mapping; unknown apps retain their exact package identifier. This is not a malware scanner. Only Android user 0 is managed. No iPhone support.
+The backend reads diagnostic commands, so polling itself introduces some load. The default target is one second, with CPU and memory collection on the fast path. App states, battery, storage, clocks, and thermal data are cached and refreshed about every four seconds. Change update speed in Settings or pause updates. Sampling uses measured counter deltas and never overlaps requests; if the connection is slow, the actual interval is shown rather than invented samples. Some phones restrict metrics; unavailable sensors display a dash. Exact per-app network traffic, disk activity, energy consumption, and per-app GPU utilization are not provided. Global GPU utilization and clock are shown only when the firmware exposes readable measurements. Package display names use a built-in mapping; unknown apps retain their exact package identifier. This is not a malware scanner. Only Android user 0 is managed. No iPhone support.
 
 Essential packages, the current home launcher, and current keyboard are protected. Other unreviewed system packages are inspection-only. Restoring a removed app requires its package to remain on the device; retaining app data is not a backup. Force stop can interrupt background work and notifications. Restore/re-enable controls apply to package state, not recovery of lost unsaved work.
 
-No phone mutations are performed at startup. No telemetry is uploaded. Action history is stored locally in Electron's user-data folder (`%APPDATA%\phone-task-manager\changes.json`), and includes device identifiers and package names. The ADB server can remain running after the app closes.
+No phone settings, apps, or app data are changed at startup. Icon loading reads only the installed APK manifest, resource table, and selected bitmap entries using Android unzip; whole APKs are not copied. Parsing runs in a bounded worker, raster icons are cached on this PC, and unknown display names retain the package-name fallback. No telemetry is uploaded. Action history is stored locally in Electron's user-data folder (`%APPDATA%\phone-task-manager\changes.json`), and includes device identifiers and package names. The ADB server can remain running after the app closes.
 
 ## Develop
 
@@ -60,4 +63,3 @@ Parser and action guard tests cover eight-core CPU normalization, Toybox CPU hea
 `npm run test:ui` runs deterministic Electron layout checks with fixture data and disabled phone-action handlers. It verifies non-overlapping metric cards, process-panel height at four window sizes, column dragging, keyboard resizing, persistence after reload, and reset. The test does not need an attached phone. Screenshots and isolated test profiles are stored in the ignored `.cache` directory.
 
 After building, `npm run test:ui -- --packaged` runs the same regression checks against the portable executable.
-

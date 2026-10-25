@@ -13,7 +13,8 @@ const rows = Array.from({ length: 90 }, (_, i) => ({ id: `com.example.app${i}`, 
   pids: [1000 + i], cpu: i / 10, memory: 100 + i, state: i % 2 ? 'Cached' : 'Background', system: false, protected: false }));
 const fixture = { info, rows, cpu: 7.5, memory: { total: 8000000, available: 2200000, usedPercent: 72.5, swapTotal: 4000000, swapUsed: 1500000 },
   battery: { level: 49, temperature: 32.4, charging: true }, cpuTemperature: 43, thermalStatus: 0,
-  storage: { total: 250000000, free: 60000000 }, uptime: 86400, warnings: [] };
+  storage: { total: 250000000, free: 60000000 }, uptime: 86400, warnings: [],
+  cpu0MHz: 2000, coreUsage: Array.from({ length: 8 }, (_, i) => ({ name: `cpu${i}`, usage: i * 5 })), sampling: { durationMs: 180, intervalMs: 1000 } };
 (async () => {
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   const packaged = process.argv.includes('--packaged');
@@ -22,16 +23,23 @@ const fixture = { info, rows, cpu: 7.5, memory: { total: 8000000, available: 220
     const page = await app.firstWindow(); const errors = [];
     page.on('pageerror', e => errors.push(e.message));
     await app.evaluate(({ ipcMain }, fixture) => {
-      for (const channel of ['devices', 'connect', 'snapshot', 'packages', 'history', 'action', 'undo']) ipcMain.removeHandler(channel);
+      for (const channel of ['devices', 'connect', 'snapshot', 'packages', 'history', 'action', 'undo', 'icons']) ipcMain.removeHandler(channel);
+      globalThis.fixtureTimes = [];
       ipcMain.handle('devices', () => ({ ok: true, data: [{ serial: 'TEST-DEVICE', status: 'device', model: 'Test' }] }));
       ipcMain.handle('connect', () => ({ ok: true, data: fixture.info }));
-      ipcMain.handle('snapshot', () => ({ ok: true, data: { ...fixture, at: Date.now() } }));
+      ipcMain.handle('snapshot', async () => { const at = Date.now(); globalThis.fixtureTimes.push(at); await new Promise(r => setTimeout(r, 180)); return { ok: true, data: { ...fixture, at } }; });
+      ipcMain.handle('icons', (_, serial, packages) => ({ ok: true, data: packages.map(pkg => ({ pkg, icon: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=' })) }));
       ipcMain.handle('packages', () => ({ ok: true, data: [] }));
       ipcMain.handle('history', () => ({ ok: true, data: [] }));
       for (const channel of ['action', 'undo']) ipcMain.handle(channel, () => ({ ok: false, error: 'Phone actions are disabled in the layout test.' }));
     }, fixture);
     await page.reload();
     await page.waitForFunction(() => document.querySelector('#deviceName').textContent === 'Test Android phone' && document.querySelectorAll('#processBody tr').length === 90);
+    await page.waitForFunction(() => document.querySelector('img.real-icon'));
+    while ((await app.evaluate(() => globalThis.fixtureTimes.length)) < 4) await new Promise(r => setTimeout(r, 200));
+    const times = await app.evaluate(() => globalThis.fixtureTimes.slice(0, 4));
+    const meanInterval = (times.at(-1) - times[0]) / 3;
+    assert.ok(meanInterval > 850 && meanInterval < 1150, `Normal refresh should start every second, measured ${meanInterval}ms`);
     await page.locator('#pause').click();
     const heights = [];
     for (const [width, height] of [[1350, 880], [1350, 1440], [1060, 680], [1920, 1080]]) {
@@ -58,7 +66,7 @@ const fixture = { info, rows, cpu: 7.5, memory: { total: 8000000, available: 220
     }
     assert.ok(heights[1] - heights[0] > 500, 'Process list did not expand with taller window');
     await page.setViewportSize({ width: 1350, height: 880 });
-    await page.evaluate(() => new Promise(requestAnimationFrame));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const statusHeader = page.locator('th[data-sort="state"]');
     const before = (await statusHeader.boundingBox()).width;
     const sortBefore = await page.locator('th.sorted').getAttribute('data-sort');
@@ -67,7 +75,7 @@ const fixture = { info, rows, cpu: 7.5, memory: { total: 8000000, available: 220
     await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
     await page.mouse.down(); await page.mouse.move(grip.x + grip.width / 2 + 25, grip.y + grip.height / 2, { steps: 8 }); await page.mouse.up();
     const after = (await statusHeader.boundingBox()).width;
-    assert.ok(after - before > 20 && after - before < 30, 'Dragging did not resize Status column');
+    assert.ok(after - before > 20 && after - before < 30, `Dragging did not resize Status column: ${before} -> ${after}`);
     assert.equal(await page.locator('th.sorted').getAttribute('data-sort'), sortBefore, 'Resize unexpectedly sorted the column');
     await page.reload(); await page.waitForFunction(() => document.querySelectorAll('#processBody tr').length === 90);
     assert.ok(Math.abs((await statusHeader.boundingBox()).width - after) < 2, 'Column width did not persist');
@@ -75,9 +83,24 @@ const fixture = { info, rows, cpu: 7.5, memory: { total: 8000000, available: 220
     assert.ok((await statusHeader.boundingBox()).width < after - 5, 'Keyboard resize failed');
     await handle.dblclick();
     assert.ok(Math.abs((await statusHeader.boundingBox()).width - before) < 2, 'Double-click reset failed');
+    await page.locator('[data-metric="memory"]').click();
+    assert.equal(await page.locator('#focusTitle').textContent(), 'Memory');
+    assert.equal(await page.locator('#memoryComposition').isVisible(), true);
+    assert.ok((await page.locator('#performanceDetails').textContent()).includes('Physical RAM'));
+    await page.locator('[data-performance="cpu"]').click();
+    assert.equal(await page.locator('#focusTitle').textContent(), 'CPU');
+    assert.equal(await page.locator('.cpu-core').count(), 8);
+    assert.equal(await page.locator('#memoryComposition').isVisible(), false);
+    await page.locator('[data-view="settings"]').click();
+    assert.equal(await page.locator('#interval').inputValue(), '1000');
+    await page.locator('#interval').selectOption('500');
+    assert.equal(await page.locator('#pause').textContent(), 'Ⅱ Pause');
+    await page.locator('#interval').selectOption('0');
+    assert.equal(await page.locator('#pause').textContent(), '▷ Resume');
+    await page.locator('[data-view="processes"]').click();
     await page.locator('#themeToggle').click();
     await page.screenshot({ path: path.join(cache, 'layout-light.png') });
     assert.deepEqual(errors, [], 'Renderer errors');
-    console.log('UI regression passed: no card overlaps, full-height process list, four window sizes, pointer and keyboard column resizing, persistence, reset, light theme. Phone actions disabled.');
+    console.log('UI regression passed: one-second refresh cadence, icon rendering, CPU/Memory focus, speed controls, no card overlaps, full-height list, four sizes, column resizing/persistence/reset, light theme. Phone actions disabled.');
   } finally { await app.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

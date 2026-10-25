@@ -2,6 +2,7 @@ const { execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { parseHardware, parseThermals, parseSensors, parseGpuUsage } = require('./hardware.cjs');
+const { parseCpuCounters, cpuDelta, parseTimedPs, processDeltas } = require('./telemetry.cjs');
 
 const LABELS = {
   'com.mi.android.globallauncher': 'POCO Launcher', 'com.android.systemui': 'System UI',
@@ -72,6 +73,7 @@ function parseTop(text) {
 function parseMemory(text) {
   const m = Object.fromEntries([...text.matchAll(/^(\w+):\s+(\d+)/gm)].map(x => [x[1], Number(x[2])]));
   return { total: m.MemTotal || 0, available: m.MemAvailable || 0, swapTotal: m.SwapTotal || 0,
+    free: m.MemFree ?? null, cached: m.Cached ?? null, buffers: m.Buffers ?? null, reclaimable: m.SReclaimable ?? null,
     swapUsed: Math.max(0, (m.SwapTotal || 0) - (m.SwapFree || 0)),
     usedPercent: m.MemTotal ? (1 - m.MemAvailable / m.MemTotal) * 100 : null };
 }
@@ -147,6 +149,7 @@ class Adb {
     const prop = key => props.match(new RegExp('\\[' + key.replaceAll('.', '\\.') + '\\]: \\[(.*?)\\]'))?.[1] || '';
     const entry = this.cache.get(serial) || {};
     const home = await this.shell(serial, 'cmd', 'package', 'resolve-activity', '--brief', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.HOME');
+    entry.previousSample = null; entry.slow = null;
     const keyboard = await this.shell(serial, 'settings', 'get', 'secure', 'default_input_method');
     entry.critical = new Set([home.trim().split('\n').at(-1)?.split('/')[0], keyboard.trim().split('/')[0]]);
     entry.info = { serial, manufacturer: prop('ro.product.manufacturer'), model: prop('ro.product.model'),
@@ -164,27 +167,37 @@ class Adb {
     return entry.info;
   }
   async snapshot(serial) {
+    const started = Date.now();
     await this.checkSerial(serial);
     if (!this.cache.get(serial)?.info) await this.connect(serial);
     const inventory = await this.inventory(serial);
-    const commands = [
-      ['top', '-b', '-d', '1', '-n', '2', '-m', '512'], ['ps', '-A', '-o', 'USER,PID,RSS,NAME'],
-      ['cat', '/proc/meminfo'], ['dumpsys', 'activity', 'processes'], ['dumpsys', 'battery'],
-      ['df', '-k', '/data'], ['cat', '/proc/uptime'], ['dumpsys', 'thermalservice'],
-      ['cat', '/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage'], ['cat', '/sys/class/kgsl/kgsl-3d0/gpuclk']
-    ];
+    const entry = this.cache.get(serial);
+    const refreshDetails = !entry.slow || started - entry.detailsAt >= 3900;
+    const commands = [ ['cat', '/proc/stat'], ['ps', '-A', '-o', 'USER,PID,RSS,TIME+,NAME'], ['cat', '/proc/meminfo'],
+      ...(refreshDetails ? [['dumpsys', 'activity', 'processes'], ['dumpsys', 'battery'], ['df', '-k', '/data'],
+        ['cat', '/proc/uptime'], ['dumpsys', 'thermalservice'], ['cat', '/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage'],
+        ['cat', '/sys/class/kgsl/kgsl-3d0/gpuclk'], ['cat', '/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq']] : []) ];
     const results = await Promise.allSettled(commands.map(c => this.shell(serial, ...c)));
-    const get = i => results[i].status === 'fulfilled' ? results[i].value : '';
+    if (refreshDetails) { entry.slow = results.slice(3).map(r => r.status === 'fulfilled' ? r.value : ''); entry.detailsAt = started; }
+    const get = i => i < 3 ? results[i].status === 'fulfilled' ? results[i].value : '' : entry.slow[i - 3] || '';
     if (results[0].status === 'rejected' && results[1].status === 'rejected') throw new Error('Could not read phone processes. Reconnect the phone and retry.');
-    const top = parseTop(get(0)); const memory = parseMemory(get(2));
-    const rows = parseProcesses(get(1), top, parseStates(get(3)), inventory);
+    const counters = parseCpuCounters(get(0)); const timed = parseTimedPs(get(1)); const memory = parseMemory(get(2));
+    const previous = entry.previousSample; const cores = [...counters.keys()].filter(k => k !== 'cpu').length || entry.info.hardware?.cores || 1;
+    const elapsed = previous ? (started - previous.at) / 1000 : 0;
+    const cpu = cpuDelta(previous?.counters.get('cpu'), counters.get('cpu'));
+    const byPid = processDeltas(previous?.times, timed.times, elapsed, cores);
+    const rows = parseProcesses(timed.text, { byPid }, parseStates(get(3)), inventory);
+    if (counters.size && timed.times.size) entry.previousSample = { at: started, counters, times: timed.times };
     const critical = this.cache.get(serial)?.critical || new Set();
     for (const row of rows) if (critical.has(row.pkg)) row.protected = true;
     const battery = get(4); const df = get(5).trim().split('\n').at(-1)?.trim().split(/\s+/) || [];
     const thermals = parseThermals(get(7));
     const cpus = thermals.filter(s => s.type === 0).map(s => s.value);
     const gpuClock = Number(get(9).trim());
-    return { at: Date.now(), rows, memory, cpu: top.cpu, info: this.cache.get(serial).info,
+    return { at: started, rows, memory, cpu, info: entry.info,
+      coreUsage: [...counters].filter(([name]) => name !== 'cpu').map(([name, current]) => ({ name, usage: cpuDelta(previous?.counters.get(name), current) })),
+      sampling: { durationMs: Date.now() - started, intervalMs: previous ? started - previous.at : null, detailsAt: entry.detailsAt },
+      cpu0MHz: Number(get(10).trim()) > 0 ? Number(get(10).trim()) / 1000 : null,
       battery: { level: Number(battery.match(/\blevel:\s*(\d+)/)?.[1]) || 0,
         temperature: Number(battery.match(/\btemperature:\s*(\d+)/)?.[1]) / 10 || null,
         charging: /(?:USB|AC|Wireless) powered: true/.test(battery) },
@@ -193,7 +206,7 @@ class Adb {
       thermalStatus: get(7).match(/Thermal Status:\s*(\d+)/) ? Number(get(7).match(/Thermal Status:\s*(\d+)/)[1]) : null,
       storage: { total: Number(df[1]) || 0, used: Number(df[2]) || 0, free: Number(df[3]) || 0 },
       uptime: Number.parseFloat(get(6)) || 0,
-      warnings: results.slice(0, 8).map((r, i) => r.status === 'rejected' ? ['CPU', 'Processes', 'Memory', 'App states', 'Battery', 'Storage', 'Uptime', 'Thermals'][i] + ' unavailable' : null).filter(Boolean) };
+      warnings: results.slice(0, 3).map((r, i) => r.status === 'rejected' ? ['CPU counters', 'Processes', 'Memory'][i] + ' unavailable' : null).filter(Boolean) };
   }
   history() {
     try { return JSON.parse(fs.readFileSync(path.join(this.dataDir, 'changes.json'), 'utf8')); }

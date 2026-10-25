@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, nativeTheme, nativeImage } = require('electron');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { Adb } = require('./adb.cjs');
+const { Icons } = require('./icons.cjs');
 let win, adb;
 if (!app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
@@ -30,6 +31,11 @@ async function perform(request) {
 app.whenReady().then(() => {
   app.setAppUserModelId('local.phone-task-manager');
   adb = new Adb(path.join(__dirname, 'platform-tools', 'adb.exe'), app.getPath('userData'));
+  const icons = new Icons(adb, app.getPath('userData'), buffer => {
+    if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'data:image/webp;base64,' + buffer.toString('base64');
+    const picture = nativeImage.createFromBuffer(buffer); if (picture.isEmpty()) return null;
+    return picture.resize({ width: 64, height: 64, quality: 'best' }).toDataURL();
+  });
   Menu.setApplicationMenu(null);
   win = new BrowserWindow({ width: 1350, height: 880, minWidth: 1060, minHeight: 680,
     backgroundColor: '#101113', title: 'Phone Task Manager', frame: false, show: false,
@@ -43,6 +49,7 @@ app.whenReady().then(() => {
   handle('snapshot', s => adb.snapshot(s));
   handle('packages', async s => { await adb.checkSerial(s); return [...(await adb.inventory(s, true)).values()].map(p => ({ ...p, protected: p.protected || adb.cache.get(s)?.critical?.has(p.pkg) })); });
   handle('history', () => adb.history());
+  handle('icons', (serial, packages) => icons.batch(serial, packages));
   handle('theme', theme => { if (!['light', 'dark'].includes(theme)) throw new Error('Invalid theme.'); nativeTheme.themeSource = theme; win.setBackgroundColor(theme === 'light' ? '#f3f5f7' : '#101113'); return theme; });
   handle('action', perform);
   handle('undo', async id => {
