@@ -59,3 +59,5 @@ Parser and action guard tests cover eight-core CPU normalization, Toybox CPU hea
 
 `npm run test:ui` runs deterministic Electron layout checks with fixture data and disabled phone-action handlers. It verifies non-overlapping metric cards, process-panel height at four window sizes, column dragging, keyboard resizing, persistence after reload, and reset. The test does not need an attached phone. Screenshots and isolated test profiles are stored in the ignored `.cache` directory.
 
+After building, `npm run test:ui -- --packaged` runs the same regression checks against the portable executable.
+

@@ -16,7 +16,8 @@ const fixture = { info, rows, cpu: 7.5, memory: { total: 8000000, available: 220
   storage: { total: 250000000, free: 60000000 }, uptime: 86400, warnings: [] };
 (async () => {
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
-  const app = await electron.launch({ executablePath: path.join(root, 'node_modules/electron/dist/electron.exe'), args: [root, `--user-data-dir=${profile}`], env });
+  const packaged = process.argv.includes('--packaged');
+  const app = await electron.launch({ executablePath: packaged ? path.resolve(root, '../PhoneTaskManager-Windows/Phone Task Manager.exe') : path.join(root, 'node_modules/electron/dist/electron.exe'), args: [...(packaged ? [] : [root]), `--user-data-dir=${profile}`], env, timeout: 25000 });
   try {
     const page = await app.firstWindow(); const errors = [];
     page.on('pageerror', e => errors.push(e.message));
