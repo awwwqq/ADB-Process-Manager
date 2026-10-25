@@ -1,0 +1,16 @@
+node_modules/
+platform-tools/
+.cache/
+dist/
+release/
+coverage/
+*.log
+*.zip
+*.exe
+*.dll
+changes.json
+phone-diagnostics/
+.env
+.env.*
+!.env.example
+

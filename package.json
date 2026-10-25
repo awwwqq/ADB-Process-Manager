@@ -1,0 +1,15 @@
+{
+  "name": "phone-task-manager",
+  "version": "0.2.0",
+  "description": "A local-first Task Manager for Android phones",
+  "main": "main.cjs",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "build": "node build.cjs"
+  },
+  "devDependencies": {
+    "electron": "45.0.0"
+  }
+}

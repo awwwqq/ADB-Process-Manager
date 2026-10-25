@@ -1,0 +1,14 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const source = __dirname;
+const target = path.resolve(source, '../PhoneTaskManager-Windows');
+if (target === source || path.dirname(target) !== path.dirname(source)) throw new Error('Invalid build destination');
+fs.cpSync(path.join(source, 'node_modules/electron/dist'), target, { recursive: true });
+const appDir = path.join(target, 'resources/app'); fs.mkdirSync(appDir, { recursive: true });
+for (const file of ['package.json', 'main.cjs', 'preload.cjs', 'adb.cjs', 'hardware.cjs', 'theme.js', 'renderer.js', 'index.html', 'style.css']) fs.copyFileSync(path.join(source, file), path.join(appDir, file));
+fs.cpSync(path.join(source, 'platform-tools'), path.join(appDir, 'platform-tools'), { recursive: true });
+fs.copyFileSync(path.join(source, 'README.md'), path.join(target, 'README.md'));
+const executable = path.join(target, 'Phone Task Manager.exe');
+if (fs.existsSync(executable)) fs.unlinkSync(executable);
+fs.renameSync(path.join(target, 'electron.exe'), executable);
+console.log('Portable app built at ' + executable);
